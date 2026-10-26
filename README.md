@@ -12,4 +12,7 @@ You have three other options, but I chose Gemeni because it appeared to have a f
 export GEMINI_API_KEY="your api key"
 ~~~
 
-Launch the game from the terminal window you exported the api key from. This might look different on your system than mine.
+Launch the game from the terminal window you exported the api key from using the love2d app. This might look different on your system than mine.
+
+You can find a love2d installer for your system here.
+https://love2d.org/
