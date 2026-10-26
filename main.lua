@@ -67,6 +67,9 @@ local SPREAD = {
   "Possible Direction",
 }
 
+-- Keys used in interpretations.lua for the three positions (same order as SPREAD)
+local POSITION_KEYS = {"past", "present", "future"}
+
 local READING_INSTRUCTIONS = [[
 You are a thoughtful tarot reader giving a three-card reflection with the
 positions Past / Context, Present / Focus, and Possible Direction. Treat tarot
@@ -196,7 +199,64 @@ local PROVIDERS = {
     end,
   },
 }
-local PROVIDER_ORDER = {"claude", "openai", "gemini"}
+----------------------------------------------------------------------
+-- Offline mode: builds a reading from interpretations.lua (no API, no internet)
+----------------------------------------------------------------------
+local function pick(list)
+  if type(list) ~= "table" or #list == 0 then return nil end
+  return list[love.math.random(#list)]
+end
+
+local function loadInterpretations()
+  -- Re-read the file every time so edits show up without restarting the game.
+  package.loaded["interpretations"] = nil
+  local ok, data = pcall(require, "interpretations")
+  if not ok then
+    error("There is a problem in interpretations.lua:\n" .. tostring(data), 0)
+  end
+  if type(data) ~= "table" then
+    error("interpretations.lua must end with: return { ... }", 0)
+  end
+  return data
+end
+
+local function buildOfflineReading(cards)
+  local data = loadInterpretations()
+  local cardTexts = data.cards or {}
+  local intros = data.intros or {}
+  local paragraphs, missing = {}, {}
+
+  for i, card in ipairs(cards) do
+    local key = POSITION_KEYS[i]
+    local entry = cardTexts[card.name]
+    local text = entry and (pick(entry[key]) or pick(entry.any))
+    if not text then
+      missing[#missing + 1] = card.name
+      text = card.name .. " speaks of " .. card.keywords ..
+        ". Consider how these themes show up in the area of life your question touches."
+    end
+    local intro = pick(intros[key])
+    local body = intro and (intro .. " " .. text) or text
+    paragraphs[#paragraphs + 1] = SPREAD[i] .. ": " .. card.name .. "\n" .. body
+  end
+
+  paragraphs[#paragraphs + 1] = pick(data.closings) or
+    "Take what resonates and leave the rest. The cards are a mirror for your own reflection, not a forecast."
+
+  if #missing > 0 then
+    paragraphs[#paragraphs + 1] = "(No custom text yet for " .. table.concat(missing, ", ") ..
+      ". Add it to interpretations.lua to replace the generic wording above.)"
+  end
+
+  return table.concat(paragraphs, "\n\n")
+end
+
+PROVIDERS.offline = {
+  label = "Offline (no API)", short = "Offline", offline = true,
+  getKey = function() return true end,
+}
+
+local PROVIDER_ORDER = {"claude", "openai", "gemini", "offline"}
 
 -- Runs curl in a background thread so the window never freezes.
 local THREAD_CODE = [[
@@ -271,8 +331,37 @@ local function newReadingState()
   }
 end
 
+-- Wraps the finished text and starts the typewriter display.
+local function finishReading(text)
+  reading.text = text
+  local _, lines = fonts.body:getWrap(text, AREA.w - 48)
+  reading.lines = lines
+  local total = 0
+  for _, line in ipairs(lines) do total = total + (utf8.len(line) or #line) end
+  reading.totalChars = total
+  reading.shown = 0
+  reading.scroll = 0
+  reading.follow = true
+  reading.status = "done"
+end
+
 local function startRequest()
   local provider = PROVIDERS[providerId]
+
+  -- Offline mode: no network, the reading comes from interpretations.lua
+  if provider.offline then
+    local cards = {}
+    for i, slot in ipairs(spread) do cards[i] = slot.card end
+    local ok, result = pcall(buildOfflineReading, cards)
+    if ok then
+      finishReading(safeText(result))
+    else
+      reading.status = "error"
+      reading.error = safeText(tostring(result))
+    end
+    return
+  end
+
   local key = provider.getKey()
   if not key then
     reading.status = "error"
@@ -335,16 +424,7 @@ local function handleResult(raw)
     return
   end
 
-  reading.text = text
-  local _, lines = fonts.body:getWrap(text, AREA.w - 48)
-  reading.lines = lines
-  local total = 0
-  for _, line in ipairs(lines) do total = total + (utf8.len(line) or #line) end
-  reading.totalChars = total
-  reading.shown = 0
-  reading.scroll = 0
-  reading.follow = true
-  reading.status = "done"
+  finishReading(text)
 end
 
 ----------------------------------------------------------------------
@@ -570,12 +650,17 @@ local function drawProviderScreen()
   drawTitle("THREE-CARD TAROT", 100)
   love.graphics.setColor(1, 1, 1)
   love.graphics.setFont(fonts.body)
-  love.graphics.printf("Choose your language model provider", 0, 156, W, "center")
+  love.graphics.printf("Choose how to get your reading", 0, 156, W, "center")
 
   for i, id in ipairs(PROVIDER_ORDER) do
     local p = PROVIDERS[id]
-    local sub = p.getKey() and "API key found" or ("needs " .. p.keyName)
-    button("provider:" .. id, 290, 230 + (i - 1) * 78, 420, 60, p.label, sub)
+    local sub
+    if p.offline then
+      sub = "reads interpretations.lua - no API key needed"
+    else
+      sub = p.getKey() and "API key found" or ("needs " .. p.keyName)
+    end
+    button("provider:" .. id, 290, 205 + (i - 1) * 70, 420, 60, p.label, sub)
   end
 
   if providerMessage then
@@ -587,6 +672,11 @@ local function drawProviderScreen()
   love.graphics.setColor(0.6, 0.6, 0.6)
   love.graphics.setFont(fonts.small)
   love.graphics.printf("Symbolic reflection and entertainment, not certain prediction.", 0, 760, W, "center")
+
+  -- Diagnostic line: confirms which copy of the game is running
+  love.graphics.setColor(0.45, 0.45, 0.45)
+  love.graphics.printf("version: offline-mode-v2   |   running from: " .. love.filesystem.getSource(),
+    20, 784, W - 40, "center")
 end
 
 local function drawAskScreen()
@@ -669,8 +759,11 @@ local function drawReadingBox()
     love.graphics.printf(reading.error or "Unknown error", AREA.x + 24, AREA.y + 60, AREA.w - 48, "left")
     love.graphics.setColor(1, 1, 1)
     love.graphics.setFont(fonts.small)
-    love.graphics.printf("Check the API key, model name, account access, connection, and usage limits. Then press New Reading.",
-      AREA.x + 24, AREA.y + AREA.h - 40, AREA.w - 48, "left")
+    local hint = "Check the API key, model name, account access, connection, and usage limits. Then press New Reading."
+    if providerId == "offline" then
+      hint = "Fix interpretations.lua and save it, then press New Reading. No restart needed."
+    end
+    love.graphics.printf(hint, AREA.x + 24, AREA.y + AREA.h - 40, AREA.w - 48, "left")
   else -- done
     local lineH = fonts.body:getHeight() * 1.3
     local x, top = AREA.x + 24, AREA.y + 16
@@ -746,6 +839,14 @@ local function loadFont(size)
 end
 
 function love.load()
+  -- Match the game's 1000x820 layout instead of LÖVE's smaller default window.
+  -- Keep resizing disabled for now because the interface uses fixed coordinates.
+  love.window.setMode(W, H, {
+    resizable = false,
+    highdpi = true,
+    vsync = 1,
+  })
+
   love.math.setRandomSeed(os.time(), math.floor(love.timer.getTime() * 1000000) % 2147483647)
   love.graphics.setBackgroundColor(0, 0, 0)
   love.keyboard.setKeyRepeat(true)
