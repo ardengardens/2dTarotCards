@@ -16,3 +16,6 @@ Launch the game from the terminal window you exported the api key from using the
 
 You can find a love2d installer for your system here.
 https://love2d.org/
+
+You can also play the game in the browser here:
+https://mossgardens.itch.io/2d-tarot
